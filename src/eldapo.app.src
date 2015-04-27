@@ -5,7 +5,9 @@
   {registered, [ eldapo ]},
   {applications, [
                   kernel,
-                  stdlib
+                  stdlib,
+                  lager,
+                  ranch
                  ]},
   {mod, { eldapo_app, []}},
   {env, []},
