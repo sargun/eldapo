@@ -10,9 +10,10 @@
 -author("sdhillon").
 
 -behaviour(gen_server).
+-behaviour(ranch_protocol).
 
 %% API
--export([start_link/0]).
+-export([start_link/4]).
 
 %% gen_server callbacks
 -export([init/1,
@@ -24,7 +25,7 @@
 
 -define(SERVER, ?MODULE).
 
--record(state, {}).
+-record(state, {ref, socket, transport, opts}).
 
 %%%===================================================================
 %%% API
@@ -36,10 +37,11 @@
 %%
 %% @end
 %%--------------------------------------------------------------------
--spec(start_link() ->
-    {ok, Pid :: pid()} | ignore | {error, Reason :: term()}).
-start_link() ->
-    gen_server:start_link({local, ?SERVER}, ?MODULE, [], []).
+%-spec(start_link() ->
+%    {ok, Pid :: pid()} | ignore | {error, Reason :: term()}).
+start_link(Ref, Socket, Transport, Opts) ->
+    io:format("Start link being called?~n"),
+    gen_server:start_link(?MODULE, [Ref, Socket, Transport, Opts], []).
 
 %%%===================================================================
 %%% gen_server callbacks
@@ -59,8 +61,13 @@ start_link() ->
 -spec(init(Args :: term()) ->
     {ok, State :: #state{}} | {ok, State :: #state{}, timeout() | hibernate} |
     {stop, Reason :: term()} | ignore).
-init([]) ->
-    {ok, #state{}}.
+init([Ref, Socket, Transport, Opts]) ->
+    io:format("Trying to accept ack~n"),
+    ok = ranch:accept_ack(Ref),
+    io:format("Ack accepted~n"),
+    Transport:setopts(Socket, [{active, true}]),
+    {ok, #state{}, 0}.
+    %{ok, #state{ref = Ref, socket = Socket, transport = Transport, opts = Opts}}.
 
 %%--------------------------------------------------------------------
 %% @private
@@ -108,7 +115,8 @@ handle_cast(_Request, State) ->
     {noreply, NewState :: #state{}} |
     {noreply, NewState :: #state{}, timeout() | hibernate} |
     {stop, Reason :: term(), NewState :: #state{}}).
-handle_info(_Info, State) ->
+handle_info(Info, State) ->
+    lager:debug("Got info: ~p", [Info]),
     {noreply, State}.
 
 %%--------------------------------------------------------------------
