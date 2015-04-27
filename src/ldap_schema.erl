@@ -21,6 +21,7 @@
     handle_info/2,
     terminate/2,
     code_change/3]).
+-export([lookup_attribute/1]).
 
 -define(SERVER, ?MODULE).
 -include("ldap_schema.hrl").
@@ -31,6 +32,8 @@
 %%% API
 %%%===================================================================
 
+lookup_attribute(Attribute) ->
+    gen_server:call(?SERVER, {lookup_attribute, Attribute}).
 %%--------------------------------------------------------------------
 %% @doc
 %% Starts the server
@@ -81,6 +84,15 @@ init([]) ->
     {noreply, NewState :: #state{}, timeout() | hibernate} |
     {stop, Reason :: term(), Reply :: term(), NewState :: #state{}} |
     {stop, Reason :: term(), NewState :: #state{}}).
+handle_call({lookup_attribute, Attribute}, _From, State = #state{attribute_types = AttributeTypes}) ->
+    Reply =
+        case orddict:find(Attribute, AttributeTypes) of
+            error ->
+                unknown;
+            {ok, Value} ->
+                Value
+        end,
+    {reply, Reply, State};
 handle_call(_Request, _From, State) ->
     {reply, ok, State}.
 
@@ -151,6 +163,7 @@ code_change(_OldVsn, State, _Extra) ->
 
 add_attribute_types(State) ->
     AttributesTypes = [
+        #attribute_type{name = ["objectClass"]},
         #attribute_type{name = ["cn", "commonName"]},
         #attribute_type{name = ["sn", "surname"]},
         #attribute_type{name = ["userPassword"], equality = "octetStringMatch"},
@@ -162,7 +175,7 @@ add_attribute_types(State) ->
 
 add_attribute_type(AttributeType, State = #state{attribute_types = AttributeTypes}) ->
     Names = AttributeType#attribute_type.name,
-    NewAttributeTypes = lists:foldl(fun(Name, Acc) -> orddict:append(Name, AttributeType, Acc) end, AttributeTypes, Names),
+    NewAttributeTypes = lists:foldl(fun(Name, Acc) -> orddict:store(Name, AttributeType, Acc) end, AttributeTypes, Names),
     State#state{attribute_types = NewAttributeTypes}.
 
 add_object_classes(State) ->
