@@ -1,0 +1,6 @@
+Riak Setup:
+1. Enable search
+2. curl http://127.0.0.1:8098/search/schema/ldap -H 'Content-Type:application/xml' --data-binary @default_schema.xml -X PUT
+3. curl -X PUT http://127.0.0.1:8098/search/index/ldap -d '{"schema":"ldap"}' -H "Content-type: application/json"
+4. riak-admin bucket-type create ldap-objects '{"props":{"datatype":"map", "search_index":"ldap"}}'
+5. riak-admin bucket-type  activate ldap-objects
