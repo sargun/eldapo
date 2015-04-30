@@ -261,11 +261,16 @@ process_message(_Message = #'LDAPMessage'{protocolOp = ProtocolOp, messageID = M
             lager:error("Error: ~p", [Error]),
             Transport:close(Socket),
             {stop, normal,State#state{message_counter = MessageID + 1}};
+        {ok, Replies, NewBackendState} when is_list(Replies) ->
+            lager:debug("Replying with: ~p", [Replies]),
+            RepliesBytes = ['LDAP-V3':encode('LDAPMessage', #'LDAPMessage'{messageID = MessageID, protocolOp = Reply}) || Reply <- Replies],
+            [Transport:send(Socket, ReplyBytes) || {ok, ReplyBytes} <- RepliesBytes],
+            {next_state, StateName, State#state{message_counter = MessageID + 1, backend_state = NewBackendState}};
         {ok, Reply, NewBackendState} ->
             {ok, ReplyBytes} = 'LDAP-V3':encode('LDAPMessage', #'LDAPMessage'{messageID = MessageID, protocolOp = Reply}),
-            lager:debug("Reply Bytes: ~p", [ReplyBytes]),
-            lager:debug("Replying with: ~p", [Reply]),
-            lager:debug("New Backend State: ~p", [NewBackendState]),
+%            lager:debug("Reply Bytes: ~p", [ReplyBytes]),
+%            lager:debug("Replying with: ~p", [Reply]),
+%            lager:debug("New Backend State: ~p", [NewBackendState]),
             Transport:send(Socket, ReplyBytes),
             {next_state, StateName, State#state{message_counter = MessageID + 1, backend_state = NewBackendState}}
     end.
