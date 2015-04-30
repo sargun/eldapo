@@ -84,9 +84,9 @@ init([]) ->
     {noreply, NewState :: #state{}, timeout() | hibernate} |
     {stop, Reason :: term(), Reply :: term(), NewState :: #state{}} |
     {stop, Reason :: term(), NewState :: #state{}}).
-handle_call({lookup_attribute, Attribute}, _From, State = #state{attribute_types = AttributeTypes}) ->
+handle_call({lookup_attribute, Attribute}, _From, State = #state{attribute_types = AttributeTypes}) when is_list(Attribute) ->
     Reply =
-        case orddict:find(Attribute, AttributeTypes) of
+        case orddict:find(string:to_lower(Attribute), AttributeTypes) of
             error ->
                 unknown;
             {ok, Value} ->
@@ -163,19 +163,19 @@ code_change(_OldVsn, State, _Extra) ->
 
 add_attribute_types(State) ->
     AttributesTypes = [
-        #attribute_type{name = ["objectClass"]},
-        #attribute_type{name = ["cn", "commonName"]},
-        #attribute_type{name = ["sn", "surname"]},
-        #attribute_type{name = ["userPassword"], equality = "octetStringMatch"},
-        #attribute_type{name = ["telephoneNumber"], equality = "telephoneNumberMatch"},
-        #attribute_type{name = ["description"], equality = "caseIgnoreMatch"}
+        #attribute_type{real_name = "objectClass", name = ["objectClass"]},
+        #attribute_type{real_name = "commonName", name = ["cn", "commonName"]},
+        #attribute_type{real_name = "surname", name = ["sn", "surname"]},
+        #attribute_type{real_name = "userPassword", name = ["userPassword"], equality = "octetStringMatch"},
+        #attribute_type{real_name = "telephoneNumber", name = ["telephoneNumber"], equality = "telephoneNumberMatch"},
+        #attribute_type{real_name = "description", name = ["description"], equality = "caseIgnoreMatch"}
     ],
     NewState = lists:foldl(fun add_attribute_type/2, State, AttributesTypes),
     NewState.
 
 add_attribute_type(AttributeType, State = #state{attribute_types = AttributeTypes}) ->
     Names = AttributeType#attribute_type.name,
-    NewAttributeTypes = lists:foldl(fun(Name, Acc) -> orddict:store(Name, AttributeType, Acc) end, AttributeTypes, Names),
+    NewAttributeTypes = lists:foldl(fun(Name, Acc) -> orddict:store(string:to_lower(Name), AttributeType, Acc) end, AttributeTypes, Names),
     State#state{attribute_types = NewAttributeTypes}.
 
 add_object_classes(State) ->
