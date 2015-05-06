@@ -2,7 +2,8 @@
     real_name,
     name,
     single_value = false,
-    equality
+    equality,
+    desc
     }).
 
 -record(object_class, {

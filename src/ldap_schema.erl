@@ -33,7 +33,12 @@
 %%%===================================================================
 
 lookup_attribute(Attribute) ->
-    gen_server:call(?SERVER, {lookup_attribute, Attribute}).
+    case gen_server:call(?SERVER, {lookup_attribute, Attribute}) of
+        unknown_attribute ->
+            erlang:throw(unknown_attribute);
+        Else ->
+            Else
+    end.
 %%--------------------------------------------------------------------
 %% @doc
 %% Starts the server

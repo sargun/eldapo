@@ -16,6 +16,7 @@
 -export([init/0, handle/2]).
 -record(bind_object, {name}).
 
+-define(BUCKET, {<<"ldap-objects">>, <<"objects">>}).
 -record(state, {bind = #bind_object{name = anonymous}, riak_client}).
 -define(WHOAMI_OID, "1.3.6.1.4.1.4203.1.11.3").
 init() ->
@@ -44,9 +45,10 @@ handle({delRequest, DN}, State) ->
     delRequest(DN, State);
 handle({unbindRequest,'NULL'}, State) ->
     {stop, none, State};
-handle({modifyRequest, _Op}, State) ->
-    {stop, none, State};
-%modifyRequest(Op, State);
+handle({modifyRequest, Op}, State) ->
+    lager:debug("Handling modify request: ~p with State: ~p", [Op, State]),
+    modifyRequest(Op, State);
+
 handle({extendedReq, ExtendedRequest}, State = #state{bind = BindObject})
         when ExtendedRequest == #'ExtendedRequest'{requestName = ?WHOAMI_OID} ->
     Name = case BindObject#bind_object.name of
@@ -68,8 +70,8 @@ handle({searchRequest, Op}, State = #state{riak_client = RiakClient}) ->
             BucketKeys = [{{proplists:get_value(<<"_yz_rt">>, KVs), proplists:get_value(<<"_yz_rb">>, KVs)}, proplists:get_value(<<"_yz_rk">>, KVs)} || {_Index, KVs} <- Docs],
             % Because eventual consistency! Between search and KV -- shit sucks
             BucketKeysDedupe = sets:to_list(sets:from_list(BucketKeys)),
-            LDAPRecords = [{searchResEntry, key2record(Bucket, Key, RiakClient)} || {Bucket, Key} <- BucketKeysDedupe],
-            lager:debug("Records: ~p", [LDAPRecords]),
+            UserObjects = [{Key, check_user_exists(riakc_pb_socket:fetch_type(RiakClient, Bucket, Key))} || {Bucket, Key} <- BucketKeysDedupe],
+            LDAPRecords = [{searchResEntry, object_to_record(CN, Object)} || {CN, {true, Object}} <- UserObjects],
             Response = LDAPRecords ++ [{'searchResDone', #'LDAPResult'{resultCode = success, matchedDN = "", errorMessage=""}}],
             {ok, Response, State}
     end;
@@ -77,12 +79,8 @@ handle(Op, State) ->
     lager:debug("Handling Op: ~p with State: ~p", [Op, State]),
     {stop, none, State}.
 
-key2record({BucketType, Bucket}, CN, RiakClient)
-    when BucketType =/= undefined
-    andalso Bucket =/= undefined
-    andalso CN =/= undefined ->
-    {ok, RiakObject} = riakc_pb_socket:fetch_type(RiakClient, {BucketType, Bucket}, CN),
-    Attributes = riakc_map:fold(fun attributeToSequence/3, [], RiakObject),
+object_to_record(CN, RiakMap) ->
+    Attributes = riakc_map:fold(fun attributeToSequence/3, [], RiakMap),
     {ok, StringCN} = asn1rt:utf8_binary_to_list(CN),
     #'SearchResultEntry'{objectName = StringCN, attributes = Attributes}.
 
@@ -91,6 +89,8 @@ attributeToSequence({Key, set}, Items, Acc) ->
     StringItems = [Val || {ok, Val} <- [asn1rt:utf8_binary_to_list(Item) || Item <- Items]],
     [#'PartialAttributeList_SEQOF'{type = StringKey, vals = StringItems}|Acc].
 
+check_user_exists({error, {notfound, map}}) ->
+    {false, riakc_map:new()};
 check_user_exists({error, Error}) ->
     {error, Error};
 check_user_exists({ok, Map}) ->
@@ -101,23 +101,34 @@ check_user_exists({ok, Map}) ->
             {true, Map}
     end.
 
-%modifyRequest(Op, State = #state{riak_client = RiakClient}) ->
-%    Bucket = {<<"ldap-objects">>, <<"objects">>},
-%    Key = list_to_binary(DN#'ModifyRequest'.object),
-%    MapResponse = riakc_pb_socket:fetch_type(RiakClient, Bucket, Key),
- %   Response =
-  %      case check_user_exists(MapResponse) of
-   %         {true, UserMap} ->
-    %            NewMap = riakc_map:fold(fun(MapKey, _Val, Acc) -> riakc_map:erase(MapKey, Acc) end, UserMap, UserMap),
-%                ok = riakc_pb_socket:update_type(RiakClient, Bucket, Key, riakc_map:to_op(NewMap)),
-%                {delResponse, #'LDAPResult'{resultCode = success, matchedDN = DN, errorMessage = "", referral = asn1_NOVALUE}};
-%            {false, _UserMap}->
-%                {delResponse, #'LDAPResult'{resultCode = noSuchObject, matchedDN = DN, errorMessage = "No Such Object", referral = asn1_NOVALUE}};
-%            {error, _} ->
-%                {delResponse, #'LDAPResult'{resultCode = unavailable, matchedDN = DN, errorMessage = "", referral = asn1_NOVALUE}}
-%        end,
-%    {ok, Response, State}.
+modifyRequest(Op, State = #state{riak_client = RiakClient}) ->
+    Bucket = {<<"ldap-objects">>, <<"objects">>},
+    Key = list_to_binary(Op#'ModifyRequest'.object),
+    MapResponse = riakc_pb_socket:fetch_type(RiakClient, Bucket, Key),
+    lager:debug("MapResponse: ~p", [MapResponse]),
+    Response =
+        case check_user_exists(MapResponse) of
+            {true, UserMap} ->
+                executeModifyRequest(UserMap, Key, Op, State);
+            {false, _UserMap} ->
+                {modifyResponse, #'LDAPResult'{resultCode = noSuchObject, matchedDN = Key, errorMessage = "No Such Object", referral = asn1_NOVALUE}};
+            {error, _} ->
+                {modifyResponse, #'LDAPResult'{resultCode = unavailable, matchedDN = Key, errorMessage = "", referral = asn1_NOVALUE}}
+        end,
+    {ok, Response, State}.
 
+executeModifyRequest(UserMap, Key, Op, _State = #state{riak_client = RiakClient}) ->
+    case makeModifyMap(UserMap, Op#'ModifyRequest'.modification) of
+        {ok, NewMap} ->
+            case riakc_pb_socket:update_type(RiakClient, ?BUCKET, Key, riakc_map:to_op(NewMap)) of
+                ok ->
+                    {modifyResponse, #'LDAPResult'{resultCode = success, matchedDN = Key, errorMessage = "", referral = asn1_NOVALUE}};
+                {error, unmodified} ->
+                    {modifyResponse, #'LDAPResult'{resultCode = unwillingToPerform, matchedDN = Key, errorMessage = "Unmodified", referral = asn1_NOVALUE}}
+            end;
+        {error, unknown_attribute} ->
+            {modifyResponse, #'LDAPResult'{resultCode = undefinedAttributeType, matchedDN = Key, errorMessage = "", referral = asn1_NOVALUE}}
+    end.
 delRequest(DN, State = #state{riak_client = RiakClient}) ->
     Bucket = {<<"ldap-objects">>, <<"objects">>},
     Key = list_to_binary(DN),
@@ -142,9 +153,9 @@ addRequest(Op, State = #state{riak_client = RiakClient}) ->
             Attributes = Op#'AddRequest'.attributes,
             Response = case makeAddMap(Attributes) of
                            {ok, Map} ->
-                               lager:debug("Adding Map to Riak: ~p", [Map]),
                                ok = riakc_pb_socket:update_type(RiakClient, Bucket, Key, riakc_map:to_op(Map)),
                                {addResponse, #'LDAPResult'{resultCode = success, matchedDN = Op#'AddRequest'.entry, errorMessage = "", referral = asn1_NOVALUE}};
+
                            {error, unknown_attribute} ->
                                {addResponse, #'LDAPResult'{resultCode = undefinedAttributeType, matchedDN = Op#'AddRequest'.entry, errorMessage = "", referral = asn1_NOVALUE}}
                        end,
@@ -159,12 +170,48 @@ addRequest(Op, State = #state{riak_client = RiakClient}) ->
     end.
 
 
+makeModifyMap(Map, Attributes) ->
+     try lists:foldl(fun populateModifyRequest/2, Map, Attributes) of
+         NewMap ->
+             {ok, NewMap}
+     catch
+         throw:unknown_attribute ->
+             {error, unknown_attribute}
+     end.
+% = #'ModifyRequest_modification_SEQOF'{operation = replace}
+populateModifyRequest(ModifyReq = #'ModifyRequest_modification_SEQOF'{modification = Modification}, RiakMap) when ModifyReq#'ModifyRequest_modification_SEQOF'.operation == replace ->
+    lager:debug("Modification: ~p", [Modification]),
+    AttributeName = Modification#'AttributeTypeAndValues'.type,
+    RealAttributeName = case ldap_schema:lookup_attribute(AttributeName) of
+                            unknown ->
+                                erlang:error(unknown_attribute);
+                            AttributeType when AttributeType#attribute_type.single_value == false ->
+                                AttributeType#attribute_type.real_name
+                        end,
+    RealAttributeNameBinary = list_to_binary(RealAttributeName),
+    AttributeSetBinary = [list_to_binary(Attribute) || Attribute <- Modification#'AttributeTypeAndValues'.vals],
+    riakc_map:update({RealAttributeNameBinary, set},
+        fun(Set) ->
+            lager:debug("Current Set: ~p", [riakc_set:value(Set)]),
+            lager:debug("New Set: ~p", [AttributeSetBinary]),
+            DeletedElements = riakc_set:value(Set) -- AttributeSetBinary,
+            NewElements = AttributeSetBinary -- riakc_set:value(Set),
+            DeletedSet = lists:foldl(fun riakc_set:del_element/2, Set, DeletedElements),
+            NewSet = lists:foldl(fun riakc_set:add_element/2, DeletedSet, NewElements),
+            lager:debug("Final: ~p", [NewSet]),
+            NewSet
+        end,
+        RiakMap).
+
+
+
+
 makeAddMap(Attributes) ->
     try lists:foldl(fun populateAddRequest/2, riakc_map:new(), Attributes) of
         Map ->
             {ok, Map}
     catch
-        error:unknown_attribute ->
+        throw:unknown_attribute ->
             {error, unknown_attribute}
     end.
 %% Set:
@@ -172,7 +219,7 @@ populateAddRequest(#'AttributeList_SEQOF'{type = AttributeName, vals = Attribute
     AttributeSetBinary = [list_to_binary(Attribute) || Attribute <- AttributeSet],
     RealAttributeName = case ldap_schema:lookup_attribute(AttributeName) of
         unknown ->
-            erlang:error(unknown_attribute);
+            erlang:throw(unknown_attribute);
         AttributeType when AttributeType#attribute_type.single_value == false ->
             AttributeType#attribute_type.real_name
     end,
@@ -208,39 +255,21 @@ generateQuery(Op) ->
     Query.
 
 generate_filters({'present', AttributeName}) ->
-    Attribute =
-        case ldap_schema:lookup_attribute(AttributeName) of
-            unknown ->
-                erlang:error(unknown_attribute);
-            Else ->
-                Else
-        end,
+    Attribute = ldap_schema:lookup_attribute(AttributeName),
     Result = case Attribute#attribute_type.single_value of
                  false ->
                      io_lib:format("~s_set:*", [Attribute#attribute_type.real_name])
              end,
     Result;
 generate_filters({equalityMatch, {'AttributeValueAssertion', AttributeName, Value}}) ->
-    Attribute =
-        case ldap_schema:lookup_attribute(AttributeName) of
-            unknown ->
-                erlang:error(unknown_attribute);
-            Else ->
-                Else
-        end,
+    Attribute = ldap_schema:lookup_attribute(AttributeName),
     Result = case Attribute#attribute_type.single_value of
        false ->
             io_lib:format("~s_set:~s", [Attribute#attribute_type.real_name, Value])
     end,
     Result;
 generate_filters({substrings,{'SubstringFilter', AttributeName, [{MatchType, Value}]}}) ->
-    Attribute =
-        case ldap_schema:lookup_attribute(AttributeName) of
-            unknown ->
-                erlang:error(unknown_attribute);
-            Else ->
-                Else
-        end,
+    Attribute = ldap_schema:lookup_attribute(AttributeName),
     AttributePrefix = case Attribute#attribute_type.single_value of
                  false ->
                      io_lib:format("~s_set:", [Attribute#attribute_type.real_name])
